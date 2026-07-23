@@ -1,0 +1,32 @@
+# macOS
+.DS_Store
+
+# Xcode — user-specific state (contains usernames, window layout, breakpoints)
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+
+# Xcode build output
+build/
+DerivedData/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+.swiftpm/xcode/package.xcworkspace/xcuserdata/
+Package.resolved
+
+# CocoaPods / Carthage (not used, but safe to ignore)
+Pods/
+Carthage/Build/
+
+# Local tooling / agent config
+.claude/settings.local.json
+
+# Secrets — never commit credentials
+*.xcconfig.local
+Secrets.plist
