@@ -9,6 +9,8 @@ enum UDKey {
     static let selectedProjectId = "selectedProjectId"
     static let selectedProjectName = "selectedProjectName"
     static let selectedUserId = "selectedUserId"
+    static let pausedEntryId = "pausedTimeEntryId"
+    static let accumulatedSeconds = "activeTimerAccumulatedSeconds"
 }
 
 @MainActor
@@ -29,6 +31,7 @@ final class TimerViewModel: ObservableObject {
     @Published var isShowingEditEntry = false
 
     @Published var isRunning = false
+    @Published var isPaused = false
     @Published var elapsedSeconds: Int = 0
     @Published var errorMessage: String?
     @Published var isShowingError = false
@@ -40,6 +43,8 @@ final class TimerViewModel: ObservableObject {
     private var ticker: Timer?
     private var startDate: Date?
     private var activeEntryId: String?
+    private var pausedEntryId: String?
+    private var accumulatedSeconds: Int = 0
     private var cancellables = Set<AnyCancellable>()
     private let networkMonitor = NWPathMonitor()
     private let networkQueue = DispatchQueue(label: "NetworkMonitor")
@@ -121,6 +126,10 @@ final class TimerViewModel: ObservableObject {
     /// voordat projecten/gebruikers geladen zijn. Valt terug op de recentste
     /// tijdregistratie wanneer er nog geen selectie bewaard is.
     func startMostRecentTimer() async {
+        if isPaused {
+            await resumeTimer()
+            return
+        }
         guard !isRunning else { return }
 
         let projectId = selectedProject?.id
@@ -142,11 +151,14 @@ final class TimerViewModel: ObservableObject {
             let entry = try await MoneybirdAPI.shared.startTimer(projectId: projectId, userId: userId)
             activeEntryId = entry.id
             startDate = parseISO8601(entry.started_at) ?? Date()
+            accumulatedSeconds = 0
 
             UserDefaults.standard.set(entry.id, forKey: UDKey.timeEntryId)
             UserDefaults.standard.set(entry.started_at, forKey: UDKey.startedAt)
+            UserDefaults.standard.removeObject(forKey: UDKey.accumulatedSeconds)
 
             isRunning = true
+            isPaused = false
             syncQuickActions()
             scheduleNotification(from: startDate!)
             startTicker()
@@ -163,7 +175,77 @@ final class TimerViewModel: ObservableObject {
 
     var timerStartDate: Date? { startDate }
 
+    /// Pauzeert de lopende timer (bijv. voor de lunch): stopt de tijdregistratie in
+    /// Moneybird maar onthoudt het entry-id zodat "Hervat" er later op verder kan gaan.
+    func pauseTimer() async {
+        guard isRunning, let entryId = activeEntryId, let start = startDate else { return }
+        do {
+            try await MoneybirdAPI.shared.stopTimer(id: entryId, endedAt: Date())
+        } catch let error as APIError {
+            if case .httpError(let code, _) = error, code == 404 {
+                // Entry bestaat niet meer in Moneybird; toch lokaal pauzeren.
+            } else {
+                presentError(error.localizedDescription)
+                return
+            }
+        } catch {
+            presentError(error.localizedDescription)
+            return
+        }
+
+        ticker?.invalidate()
+        ticker = nil
+        accumulatedSeconds += max(0, Int(Date().timeIntervalSince(start)))
+        pausedEntryId = entryId
+        activeEntryId = nil
+        startDate = nil
+        isRunning = false
+        isPaused = true
+
+        UserDefaults.standard.removeObject(forKey: UDKey.timeEntryId)
+        UserDefaults.standard.removeObject(forKey: UDKey.startedAt)
+        UserDefaults.standard.set(pausedEntryId, forKey: UDKey.pausedEntryId)
+        UserDefaults.standard.set(accumulatedSeconds, forKey: UDKey.accumulatedSeconds)
+        UNUserNotificationCenter.current()
+            .removePendingNotificationRequests(withIdentifiers: ["timer_8h_warning"])
+
+        syncQuickActions()
+        await loadRecentTimers()
+    }
+
+    /// Hervat de gepauzeerde timer op dezelfde tijdregistratie.
+    func resumeTimer() async {
+        guard isPaused, let entryId = pausedEntryId else { return }
+        do {
+            let reopened = try await MoneybirdAPI.shared.reopenTimer(id: entryId)
+            activeEntryId = reopened.id
+            startDate = parseISO8601(reopened.started_at) ?? Date()
+            pausedEntryId = nil
+
+            UserDefaults.standard.set(reopened.id, forKey: UDKey.timeEntryId)
+            UserDefaults.standard.set(reopened.started_at, forKey: UDKey.startedAt)
+            UserDefaults.standard.removeObject(forKey: UDKey.pausedEntryId)
+
+            isRunning = true
+            isPaused = false
+            syncQuickActions()
+            scheduleNotification(from: startDate!)
+            startTicker()
+            await loadRecentTimers()
+        } catch let error as APIError {
+            presentError(error.localizedDescription)
+        } catch {
+            presentError(error.localizedDescription)
+        }
+    }
+
     func stopTimer(endedAt: Date = Date()) async {
+        if isPaused {
+            // Entry is al beëindigd in Moneybird toen de timer gepauzeerd werd.
+            clearTimerState()
+            await loadRecentTimers()
+            return
+        }
         guard let entryId = activeEntryId else { return }
         do {
             try await MoneybirdAPI.shared.stopTimer(id: entryId, endedAt: endedAt)
@@ -181,7 +263,9 @@ final class TimerViewModel: ObservableObject {
     }
 
     func restartTimer(entry: TimeEntry) async {
-        guard !isRunning else { return }
+        guard !isRunning, !isPaused else { return }
+        accumulatedSeconds = 0
+        UserDefaults.standard.removeObject(forKey: UDKey.accumulatedSeconds)
         do {
             let reopened = try await MoneybirdAPI.shared.reopenTimer(id: entry.id)
             activeEntryId = reopened.id
@@ -260,21 +344,28 @@ final class TimerViewModel: ObservableObject {
     // MARK: - Private helpers
 
     private func restoreTimerIfNeeded() {
-        guard let entryId = UserDefaults.standard.string(forKey: UDKey.timeEntryId),
-              let startedAtString = UserDefaults.standard.string(forKey: UDKey.startedAt),
-              let start = parseISO8601(startedAtString) else { return }
+        accumulatedSeconds = UserDefaults.standard.integer(forKey: UDKey.accumulatedSeconds)
 
-        activeEntryId = entryId
-        startDate = start
-        isRunning = true
-        elapsedSeconds = max(0, Int(Date().timeIntervalSince(start)))
-        syncQuickActions()
+        if let entryId = UserDefaults.standard.string(forKey: UDKey.timeEntryId),
+           let startedAtString = UserDefaults.standard.string(forKey: UDKey.startedAt),
+           let start = parseISO8601(startedAtString) {
+            activeEntryId = entryId
+            startDate = start
+            isRunning = true
+            elapsedSeconds = accumulatedSeconds + max(0, Int(Date().timeIntervalSince(start)))
+            syncQuickActions()
 
-        let elapsed = Date().timeIntervalSince(start)
-        if elapsed < 8 * 3600 {
-            scheduleNotification(from: start)
+            let elapsed = Date().timeIntervalSince(start)
+            if elapsed < 8 * 3600 {
+                scheduleNotification(from: start)
+            }
+            startTicker()
+        } else if let entryId = UserDefaults.standard.string(forKey: UDKey.pausedEntryId) {
+            pausedEntryId = entryId
+            isPaused = true
+            elapsedSeconds = accumulatedSeconds
+            syncQuickActions()
         }
-        startTicker()
     }
 
     private func restoreSelectedProject() {
@@ -287,7 +378,7 @@ final class TimerViewModel: ObservableObject {
     /// laatst gebruikte project.
     private func syncQuickActions() {
         let name = selectedProject?.name ?? UserDefaults.standard.string(forKey: UDKey.selectedProjectName)
-        QuickActionCenter.shared.updateShortcuts(isRunning: isRunning, projectName: name)
+        QuickActionCenter.shared.updateShortcuts(isRunning: isRunning || isPaused, projectName: name)
     }
 
     private func restoreSelectedUser() {
@@ -301,7 +392,7 @@ final class TimerViewModel: ObservableObject {
             guard let self else { return }
             Task { @MainActor [weak self] in
                 guard let self, let start = self.startDate else { return }
-                self.elapsedSeconds = max(0, Int(Date().timeIntervalSince(start)))
+                self.elapsedSeconds = self.accumulatedSeconds + max(0, Int(Date().timeIntervalSince(start)))
             }
         }
     }
@@ -310,11 +401,16 @@ final class TimerViewModel: ObservableObject {
         ticker?.invalidate()
         ticker = nil
         isRunning = false
+        isPaused = false
         elapsedSeconds = 0
+        accumulatedSeconds = 0
         startDate = nil
         activeEntryId = nil
+        pausedEntryId = nil
         UserDefaults.standard.removeObject(forKey: UDKey.timeEntryId)
         UserDefaults.standard.removeObject(forKey: UDKey.startedAt)
+        UserDefaults.standard.removeObject(forKey: UDKey.pausedEntryId)
+        UserDefaults.standard.removeObject(forKey: UDKey.accumulatedSeconds)
         UNUserNotificationCenter.current()
             .removePendingNotificationRequests(withIdentifiers: ["timer_8h_warning"])
         syncQuickActions()

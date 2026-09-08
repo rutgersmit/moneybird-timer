@@ -15,7 +15,7 @@ struct ContentView: View {
                     userPickerSection
                         .padding(.vertical, 8)
 
-                    if viewModel.isRunning {
+                    if viewModel.isRunning || viewModel.isPaused {
                         timerDisplay
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 8)
@@ -62,7 +62,7 @@ struct ContentView: View {
                                         }
                                         .tint(.blue)
 
-                                        if !viewModel.isRunning {
+                                        if !viewModel.isRunning && !viewModel.isPaused {
                                             Button {
                                                 Task { await viewModel.restartTimer(entry: entry) }
                                             } label: {
@@ -159,7 +159,7 @@ struct ContentView: View {
                 if let project = newProject { viewModel.selectProject(project) }
             }
         }
-        .disabled(viewModel.isRunning)
+        .disabled(viewModel.isRunning || viewModel.isPaused)
     }
 
     @ViewBuilder
@@ -180,7 +180,7 @@ struct ContentView: View {
                 if let user = newUser { viewModel.selectUser(user) }
             }
         }
-        .disabled(viewModel.isRunning)
+        .disabled(viewModel.isRunning || viewModel.isPaused)
     }
 
     @ViewBuilder
@@ -224,6 +224,7 @@ struct ContentView: View {
         let overtimeProgress = isOvertime
             ? min(1.0, CGFloat(viewModel.elapsedSeconds - eightHours) / CGFloat(eightHours))
             : 0.0
+        let isPaused = viewModel.isPaused
 
         return ZStack {
             // Grijze achtergrondring
@@ -233,7 +234,7 @@ struct ContentView: View {
             // Rode boog: loopt vol over 8 uur, blijft vol daarna
             Circle()
                 .trim(from: 0, to: mainProgress)
-                .stroke(Color.red, style: StrokeStyle(lineWidth: 10, lineCap: .round))
+                .stroke(isPaused ? Color.gray : Color.red, style: StrokeStyle(lineWidth: 10, lineCap: .round))
                 .rotationEffect(.degrees(-90))
                 .animation(.linear(duration: 1), value: viewModel.elapsedSeconds)
 
@@ -241,43 +242,79 @@ struct ContentView: View {
             if isOvertime {
                 Circle()
                     .trim(from: 0, to: overtimeProgress)
-                    .stroke(Color.orange, style: StrokeStyle(lineWidth: 10, lineCap: .round))
+                    .stroke(isPaused ? Color.gray.opacity(0.6) : Color.orange, style: StrokeStyle(lineWidth: 10, lineCap: .round))
                     .rotationEffect(.degrees(-90))
                     .animation(.linear(duration: 1), value: viewModel.elapsedSeconds)
             }
 
-            Text(viewModel.elapsedDisplay)
-                .font(.system(size: 40, weight: .semibold, design: .monospaced))
-                .foregroundStyle(isOvertime ? Color.orange : Color.primary)
-                .contentTransition(.numericText())
+            VStack(spacing: 4) {
+                Text(viewModel.elapsedDisplay)
+                    .font(.system(size: 40, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(isPaused ? Color.secondary : (isOvertime ? Color.orange : Color.primary))
+                    .contentTransition(.numericText())
+
+                if isPaused {
+                    Label("Gepauzeerd", systemImage: "pause.fill")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
         .frame(width: 210, height: 210)
     }
 
     private var actionButton: some View {
         let canStart = viewModel.isNetworkAvailable
-        let buttonColor: Color = viewModel.isRunning ? .red : (canStart ? .green : .gray)
 
-        return Button {
-            Task {
-                if viewModel.isRunning {
-                    await viewModel.stopTimer()
-                } else {
-                    await viewModel.startTimer()
+        return HStack(spacing: 12) {
+            if viewModel.isRunning {
+                Button {
+                    Task { await viewModel.pauseTimer() }
+                } label: {
+                    Label("Pauze", systemImage: "pause.fill")
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 130, minHeight: 60)
+                        .background(Color.orange, in: RoundedRectangle(cornerRadius: 16))
+                }
+            } else if viewModel.isPaused {
+                Button {
+                    Task { await viewModel.resumeTimer() }
+                } label: {
+                    Label("Hervat", systemImage: "play.fill")
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 130, minHeight: 60)
+                        .background(canStart ? Color.green : Color.gray, in: RoundedRectangle(cornerRadius: 16))
+                }
+                .disabled(!canStart)
+            } else {
+                Button {
+                    Task { await viewModel.startTimer() }
+                } label: {
+                    Label("Start", systemImage: "play.fill")
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 130, minHeight: 60)
+                        .background(canStart ? Color.green : Color.gray, in: RoundedRectangle(cornerRadius: 16))
+                }
+                .disabled(!canStart)
+            }
+
+            if viewModel.isRunning || viewModel.isPaused {
+                Button {
+                    Task { await viewModel.stopTimer() }
+                } label: {
+                    Label("Stop", systemImage: "stop.fill")
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 90, minHeight: 60)
+                        .background(Color.red, in: RoundedRectangle(cornerRadius: 16))
                 }
             }
-        } label: {
-            Label(
-                viewModel.isRunning ? "Stop" : "Start",
-                systemImage: viewModel.isRunning ? "stop.fill" : "play.fill"
-            )
-            .font(.title2.weight(.semibold))
-            .foregroundStyle(.white)
-            .frame(minWidth: 180, minHeight: 60)
-            .background(buttonColor, in: RoundedRectangle(cornerRadius: 16))
         }
-        .disabled(!viewModel.isRunning && !canStart)
         .animation(.easeInOut(duration: 0.2), value: viewModel.isRunning)
+        .animation(.easeInOut(duration: 0.2), value: viewModel.isPaused)
         .animation(.easeInOut(duration: 0.3), value: viewModel.isNetworkAvailable)
     }
 
