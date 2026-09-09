@@ -271,12 +271,13 @@ struct ContentView: View {
                 Button {
                     Task { await viewModel.pauseTimer() }
                 } label: {
-                    Label("Pauze", systemImage: "pause.fill")
+                    Image(systemName: "pause.fill")
                         .font(.title2.weight(.semibold))
                         .foregroundStyle(.white)
-                        .frame(minWidth: 130, minHeight: 60)
+                        .frame(minWidth: 60, minHeight: 60)
                         .background(Color.orange, in: RoundedRectangle(cornerRadius: 16))
                 }
+                .accessibilityLabel("Pauze")
             } else if viewModel.isPaused {
                 Button {
                     Task { await viewModel.resumeTimer() }
@@ -308,7 +309,8 @@ struct ContentView: View {
                     Label("Stop", systemImage: "stop.fill")
                         .font(.title2.weight(.semibold))
                         .foregroundStyle(.white)
-                        .frame(minWidth: 90, minHeight: 60)
+                        .padding(.horizontal, 16)
+                        .frame(minWidth: 130, minHeight: 60)
                         .background(Color.red, in: RoundedRectangle(cornerRadius: 16))
                 }
             }
