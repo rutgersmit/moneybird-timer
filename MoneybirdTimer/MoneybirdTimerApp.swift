@@ -47,14 +47,19 @@ final class QuickActionCenter: ObservableObject {
 
 final class AppDelegate: NSObject, UIApplicationDelegate {
     /// Koude start via een quick action: de getikte actie zit in `options`.
+    /// `pending` wordt hier synchroon gezet (UIKit roept dit altijd op de main
+    /// thread aan) in plaats van via een losse Task: anders kan SwiftUI de
+    /// ContentView al opbouwen en `pending` controleren vóórdat die Task is
+    /// uitgevoerd, waardoor de shortcut soms genegeerd werd.
     func application(
         _ application: UIApplication,
         configurationForConnecting connectingSceneSession: UISceneSession,
         options: UIScene.ConnectionOptions
     ) -> UISceneConfiguration {
         if let shortcut = options.shortcutItem {
-            let type = shortcut.type
-            Task { @MainActor in QuickActionCenter.shared.pending = type }
+            MainActor.assumeIsolated {
+                QuickActionCenter.shared.pending = shortcut.type
+            }
         }
         return UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
     }
@@ -65,8 +70,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         performActionFor shortcutItem: UIApplicationShortcutItem,
         completionHandler: @escaping (Bool) -> Void
     ) {
-        let type = shortcutItem.type
-        Task { @MainActor in QuickActionCenter.shared.pending = type }
+        MainActor.assumeIsolated {
+            QuickActionCenter.shared.pending = shortcutItem.type
+        }
         completionHandler(true)
     }
 }
